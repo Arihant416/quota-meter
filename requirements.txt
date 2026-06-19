@@ -1,0 +1,3 @@
+fastapi[standard]
+redis[asyncio]
+motor
