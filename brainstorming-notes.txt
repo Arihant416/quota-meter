@@ -11,7 +11,7 @@ Constraints:
 ->> Scale : 5000 orgs consuming 30 metered features can go upto 50000 orgs consuming the features
 ->> Traffic: Peak 10k TPS (A few large batches in seconds, then quiet)
 ->> Deployment : Currently 8 instances, growing (horizontally scaled). 
-->> Latency : Less than 10ms per operation (something in-memory RAM based Redis dependent rate-limiting (for atomicity + speed))
+->> Latency : Less than 10ms per operation (something in-memory RAM based "Redis dependent rate-limiting (for atomicity + speed)")
 
 ** Decisioning : 
 -> Concurrent correctness : if tokens exhausted or all requests trying to exhaust tokens what needs to be done! 
