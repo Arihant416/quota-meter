@@ -12,12 +12,12 @@ The assignment asked me to make four explicit decisions: concurrent correctness,
 
 ## AI Assistance Disclosure
 
-I used Claude (Anthropic) as a design partner and sounding board throughout this project. I want to be specific about what that means in practice:
+I used AI as a design partner and sounding board throughout this project. I want to be specific about what that means in practice:
 
 **Where AI helped:**
 
 - Brainstorming the initial architecture and talking through tradeoffs (cache-aside vs warm Redis, lazy loading vs permanent warmup, etc.)
-- Explaining Lua syntax and Redis Lua semantics — I hadn't written Lua before this
+- Explaining Lua syntax and Redis Lua semantics — I hadn't written this complicated Lua before this
 - Generating the initial test scaffolding which I then rewrote significantly
 - Suggesting FastAPI-specific patterns like `Depends()` and lifespan context managers
 - Pointing out the idempotency race condition in my first implementation
@@ -30,8 +30,6 @@ I used Claude (Anthropic) as a design partner and sounding board throughout this
 - The Redis key schema
 - The request record design (storing granted/units/refunded state alongside the idempotency result)
 - Every tradeoff documented in this file
-
-The code reflects my understanding. I wouldn't submit something I couldn't defend line by line.
 
 ---
 
