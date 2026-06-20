@@ -521,4 +521,67 @@ quota-meter/
 └── pytest.ini
 ```
 
+## Running tests
+
+### 1) Run the concurrency test suite
+
+The `pytest` suite is an **integration test suite**, so it requires **Redis** and **MongoDB** to be running.
+
+Start the required infrastructure first:
+
+```bash
+docker compose up -d redis mongodb
+```
+
+Then run the tests:
+
+```bash
+pytest -v -s
+```
+
+Once the tests are done, stop those containers before running the load simulation:
+
+```bash
+docker compose stop redis mongodb
+```
+
+---
+
+### 2) Run the multi-instance load simulation
+
+The load simulation starts the **full Docker Compose stack**, which includes:
+
+- Redis
+- MongoDB
+- 3 quota-service instances
+- 1 load-simulator container
+
+Before starting it, make sure Redis and MongoDB from the pytest setup are not already running, otherwise you may hit a port conflict on `6379` / `27017`.
+
+Run the full load test stack:
+
+```bash
+docker-compose up --build
+```
+
+The `load-simulator` container starts automatically and runs two scenarios:
+
+- **Scenario A:** concurrent saturation / over-limit validation
+- **Scenario B:** replaying the same idempotency key to verify idempotent behavior
+
+To inspect the load test results:
+
+```bash
+docker logs load-simulator
+```
+
+---
+
+### Notes
+
+- The `pytest` suite validates correctness and concurrency behavior against real Redis and MongoDB instances.
+- The load simulation validates the service under concurrent multi-instance traffic and checks that quota is never over-served.
+- If you only want to run the tests, you do **not** need to start the full multi-instance stack — Redis and MongoDB are enough.
+
+
 **To conclude:** This was genuinely a very interesting problem to work on.
