@@ -6,7 +6,7 @@
 
 A per-customer, per-feature monthly quota enforcement system built as a horizontally scalable FastAPI service. Each customer organization gets a configurable monthly allowance for specific API features. Every inbound request checks and deducts from that allowance atomically before the underlying feature executes.
 
-The assignment asked me to make four explicit decisions: concurrent correctness, batch behavior, failure and retry semantics, and reset and reporting. Everything else — storage, integration shape, failure posture — follows from those four.
+The key question is to make four explicit decisions: concurrent correctness, batch behavior, failure and retry semantics, and reset and reporting. Everything else — storage, integration shape, failure posture — follows from those four.
 
 ---
 
