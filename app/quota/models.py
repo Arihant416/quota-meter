@@ -12,7 +12,7 @@ class ConsumeRequest(BaseModel):
 class QuotaResult(BaseModel):
     granted: bool
     remaining: int = Field(..., ge=0)
-    resets_at: datetime
+    next_reset_at: datetime
     org_id: str
     feature: str
 
@@ -24,7 +24,7 @@ class UsageResponse(BaseModel):
     limit: int
     used: int
     remaining: int = Field(..., ge=0)
-    resets_at: datetime
+    next_reset_at: datetime
 
 
 class RefundRequest(BaseModel):

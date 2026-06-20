@@ -49,8 +49,7 @@ def quota_guard(feature: str, units: int = 1):
             )
         except RedisError as e:
             raise HTTPException(
-                status_code=503,
-                detail="Quota service temporarily unavailable"
+                status_code=503, detail="Quota service temporarily unavailable"
             )
         except ValueError as e:
             if str(e) == "org_not_configured":
@@ -67,7 +66,7 @@ def quota_guard(feature: str, units: int = 1):
                 detail={
                     "error": "quota_exhausted",
                     "remaining": result.remaining,
-                    "resets_at": result.resets_at.isoformat(),
+                    "next_reset_at": result.next_reset_at.isoformat(),
                     "org_id": org_id,
                     "feature": feature,
                 },

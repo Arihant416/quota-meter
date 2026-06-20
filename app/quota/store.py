@@ -3,8 +3,7 @@ from __future__ import annotations
 """
 This is the heart of the quota-meter engine.
 Handles all Redis operations including atomic Lua scripts.
-"""
-"""
+
 Redis store + Lua scripts for quota metering.
 
 Key ideas:

@@ -3,7 +3,6 @@ Business logic layer — orchestrates store calls,
 handles idempotency, and builds response models.
 """
 
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -44,7 +43,7 @@ async def consume(
     return QuotaResult(
         granted=result["granted"],
         remaining=result["remaining"],
-        resets_at=_get_resets_at(),
+        next_reset_at=_get_resets_at(),
         org_id=org_id,
         feature=feature,
     )
@@ -69,7 +68,7 @@ async def refund(
     return QuotaResult(
         granted=True,
         remaining=result["remaining"],
-        resets_at=_get_resets_at(),
+        next_reset_at=_get_resets_at(),
         org_id=org_id,
         feature=feature,
     )
@@ -90,5 +89,5 @@ async def get_usage(
         limit=limit,
         used=used,
         remaining=remaining,
-        resets_at=_get_resets_at(),
+        next_reset_at=_get_resets_at(),
     )

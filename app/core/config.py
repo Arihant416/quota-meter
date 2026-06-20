@@ -15,12 +15,3 @@ def create_redis() -> Redis:
 
 def create_mongo() -> AsyncIOMotorClient:
     return AsyncIOMotorClient(MONGO_URL, maxPoolSize=50, minPoolSize=8)
-
-
-# ------accessors to be used with (Depends()) -> A Dependency Injection mechanism by FastAPI.
-async def get_redis(request) -> Redis:
-    return request.app.state.redis
-
-
-async def get_mongo_db(request):
-    return request.app.state.mongo[DB_NAME]
