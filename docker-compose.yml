@@ -1,0 +1,93 @@
+version: "3.9"
+
+services:
+
+  redis:
+    image: redis:8-alpine
+    container_name: quota-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes  # enable AOF persistence
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mongodb:
+    image: mongo:7
+    container_name: quota-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+# Horizontal Scaling in practice : 3 Quota Service Instances
+# All Sharing one redis, one mongodb instance
+
+  quota-service-1:
+    build: .
+    container_name: quota-service-1
+    ports:
+      - "8001:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MONGO_URL=mongodb://mongodb:27017
+      - DB_NAME=quota_db
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+
+  quota-service-2:
+    build: .
+    container_name: quota-service-2
+    ports:
+      - "8002:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MONGO_URL=mongodb://mongodb:27017
+      - DB_NAME=quota_db
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+
+  quota-service-3:
+    build: .
+    container_name: quota-service-3
+    ports:
+      - "8003:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MONGO_URL=mongodb://mongodb:27017
+      - DB_NAME=quota_db
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+
+  load-simulator:
+    build: .
+    container_name: load-simulator
+    command: python -m load_test.simulate
+    environment:
+      - TARGETS=http://quota-service-1:8000,http://quota-service-2:8000,http://quota-service-3:8000
+    depends_on:
+      - quota-service-1
+      - quota-service-2
+      - quota-service-3
+
+volumes:
+  redis_data:
+  mongo_data:
