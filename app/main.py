@@ -2,6 +2,7 @@ import logging
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from app.core.config import create_redis, create_mongo
+from app.features.routes import router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Quota Metering Engine", version="1.0.0", lifespan=lifespan)
+app.include_router(router, prefix="/api/v1")
 
 
 @app.get("/health")
