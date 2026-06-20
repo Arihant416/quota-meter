@@ -3,18 +3,16 @@ Feature endpoints — demonstrate quota engine in action.
 Each endpoint is protected by quota_guard dependency.
 """
 
-from fastapi import Request, HTTPException
+from fastapi import HTTPException, Request
 from fastapi.routing import APIRouter
 from pydantic import BaseModel, Field
-from app.quota.models import QuotaResult, UsageResponse, RefundRequest
-from app.quota.dependencies import quota_guard
-from app.quota import service
+
 from app.core.config import DB_NAME
+from app.quota import service
+from app.quota.dependencies import quota_guard
+from app.quota.models import QuotaResult, RefundRequest, UsageResponse
 
 router = APIRouter()
-
-
-# ── Request Models ─────────────────────────────────────────────────────────────
 
 
 class TrackContainersPayload(BaseModel):
@@ -33,21 +31,12 @@ class QuotaConfigPayload(BaseModel):
     limit: int = Field(..., gt=0)
 
 
-# ── Feature Endpoints ──────────────────────────────────────────────────────────
-
-
 @router.post("/track-containers")
 async def track_containers(
     request: Request,
     payload: TrackContainersPayload,
 ):
-    """
-    Track a batch of containers.
-    Consumes len(containers) quota units atomically.
-    """
     units = len(payload.containers)
-
-    # manually call quota_guard with dynamic units
     await quota_guard(feature="container-tracking", units=units)(request)
 
     return {
@@ -63,10 +52,6 @@ async def sailing_schedule(
     request: Request,
     payload: SailingSchedulePayload,
 ):
-    """
-    Look up sailing schedules.
-    Consumes payload.lookups quota units.
-    """
     await quota_guard(feature="sailing-schedule", units=payload.lookups)(request)
 
     return {
@@ -78,18 +63,12 @@ async def sailing_schedule(
     }
 
 
-# ── Quota Management Endpoints ─────────────────────────────────────────────────
-
-
 @router.get("/quota/usage")
 async def quota_usage(
     request: Request,
     org_id: str,
     feature: str,
 ) -> UsageResponse:
-    """
-    Returns current quota usage for an org and feature.
-    """
     redis = request.app.state.redis
     db = request.app.state.mongo[DB_NAME]
 
@@ -108,8 +87,7 @@ async def quota_refund(
     payload: RefundRequest,
 ) -> QuotaResult:
     """
-    Refunds quota units back to an org.
-    Called when downstream operation fails after quota was deducted.
+    Refund a previously granted consume request using the ORIGINAL consume idempotency key.
     """
     redis = request.app.state.redis
 
@@ -118,13 +96,29 @@ async def quota_refund(
             redis=redis,
             org_id=payload.org_id,
             feature=payload.feature,
-            units=payload.units,
-            idempotency_key=payload.idempotency_key,
+            original_idempotency_key=payload.original_idempotency_key,
         )
-    except ValueError:
-        raise HTTPException(
-            status_code=403, detail=f"Organization '{payload.org_id}' is not configured"
-        )
+    except ValueError as e:
+        detail = str(e)
+
+        if detail == "org_not_configured":
+            raise HTTPException(
+                status_code=403, detail="Organization is not configured"
+            )
+        if detail == "original_request_not_found":
+            raise HTTPException(status_code=404, detail="Original request not found")
+        if detail == "request_org_feature_mismatch":
+            raise HTTPException(
+                status_code=400,
+                detail="Original request does not belong to supplied org/feature",
+            )
+        if detail == "cannot_refund_denied_request":
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot refund a denied quota request",
+            )
+
+        raise HTTPException(status_code=400, detail=detail)
 
 
 @router.post("/admin/quota/config")
@@ -132,19 +126,15 @@ async def quota_config(
     request: Request,
     payload: QuotaConfigPayload,
 ) -> dict:
-    """
-    Sets quota limit for an org and feature.
-    Writes to both Redis and MongoDB simultaneously.
-    """
     redis = request.app.state.redis
     db = request.app.state.mongo[DB_NAME]
 
     config_key = f"quota_config:{payload.org_id}:{payload.feature}"
 
-    # write to Redis — no TTL, permanent
+    # Write to Redis hot store
     await redis.set(config_key, payload.limit)
 
-    # write to MongoDB — source of truth
+    # Write to Mongo source of truth
     await db["quota_configs"].update_one(
         {"org_id": payload.org_id, "feature": payload.feature},
         {

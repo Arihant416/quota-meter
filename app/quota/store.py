@@ -1,109 +1,310 @@
+from __future__ import annotations
+
 """
 This is the heart of the quota-meter engine.
 Handles all Redis operations including atomic Lua scripts.
 """
+"""
+Redis store + Lua scripts for quota metering.
+
+Key ideas:
+- Quota deduction is atomic.
+- Idempotency is handled inside the same Lua script as quota mutation.
+- Refunds are tied to the original successful consume request.
+"""
+
+
+import json
+from datetime import datetime, timezone
+from typing import Any
 
 from redis.asyncio import Redis
-from datetime import datetime, timezone
 
-DEDUCT_LUA_SCRIPT = """
--- KEYS[1] = counter_key  (quota:org1:container-tracking:2026-06)
--- KEYS[2] = config_key   (quota_config:org1:container-tracking)
--- ARGV[1] = units requested
+COUNTER_TTL_SECONDS = 35 * 24 * 60 * 60  # 35 days
+REQUEST_TTL_SECONDS = 35 * 24 * 60 * 60  # keep request records for the billing period
 
--- step 1: get limit, if nil org not configured
+
+CONSUME_LUA_SCRIPT = """
+-- KEYS[1] = counter_key
+-- KEYS[2] = config_key
+-- KEYS[3] = request_key
+--
+-- ARGV[1] = units
+-- ARGV[2] = org_id
+-- ARGV[3] = feature
+-- ARGV[4] = period
+-- ARGV[5] = request_ttl_seconds
+-- ARGV[6] = counter_ttl_seconds
+
+-- Request record format:
+-- {
+--   "org_id": "...",
+--   "feature": "...",
+--   "units": 10,
+--   "granted": true/false,
+--   "remaining": 490,
+--   "period": "2026-06",
+--   "refunded": false
+-- }
+
+-- 1) Idempotency check: if request already exists, return prior result.
+local existing = redis.call('GET', KEYS[3])
+if existing then
+    local obj = cjson.decode(existing)
+    local granted_num = obj.granted and 1 or 0
+    local refunded_num = obj.refunded and 1 or 0
+    return {2, granted_num, tonumber(obj.remaining), refunded_num}
+end
+
+-- 2) Load configured limit
 local limit = tonumber(redis.call('GET', KEYS[2]))
 if not limit then
-    return {-1, 0}   -- -1 = org not configured → 403
+    return {-1, 0, 0, 0} -- org not configured
 end
 
--- step 2: get current counter, nil means first request of month
+-- 3) Load current usage
 local current = tonumber(redis.call('GET', KEYS[1]) or 0)
-
--- step 3: calculate remaining
+local units = tonumber(ARGV[1])
 local remaining = limit - current
 
--- step 4: check if enough quota
-if remaining >= tonumber(ARGV[1]) then
-    redis.call('INCRBY', KEYS[1], ARGV[1])
-    redis.call('EXPIRE', KEYS[1], 3024000)  -- 35 days in seconds
-    return {1, remaining - tonumber(ARGV[1])}  -- granted
+local granted = 0
+local new_remaining = remaining
+
+if remaining >= units then
+    redis.call('INCRBY', KEYS[1], units)
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
+    granted = 1
+    new_remaining = remaining - units
 else
-    return {0, remaining}  -- denied
+    granted = 0
+    new_remaining = remaining
 end
+
+local request_record = cjson.encode({
+    org_id = ARGV[2],
+    feature = ARGV[3],
+    units = units,
+    granted = granted == 1,
+    remaining = new_remaining,
+    period = ARGV[4],
+    refunded = false
+})
+
+redis.call('SET', KEYS[3], request_record, 'EX', tonumber(ARGV[5]))
+
+return {1, granted, new_remaining, 0}
 """
+
 
 REFUND_LUA_SCRIPT = """
 -- KEYS[1] = counter_key
 -- KEYS[2] = config_key
--- ARGV[1] = units to refund
+-- KEYS[3] = request_key
+--
+-- ARGV[1] = org_id
+-- ARGV[2] = feature
+-- ARGV[3] = request_ttl_seconds
+
+-- Refunds the ORIGINAL consume request, not an arbitrary unit amount.
+
+local request_raw = redis.call('GET', KEYS[3])
+if not request_raw then
+    return {-2, 0} -- original request not found
+end
+
+local obj = cjson.decode(request_raw)
+
+if obj.org_id ~= ARGV[1] or obj.feature ~= ARGV[2] then
+    return {-3, 0} -- request does not belong to supplied org/feature
+end
+
+if not obj.granted then
+    return {-4, tonumber(obj.remaining)} -- cannot refund a denied request
+end
+
+if obj.refunded then
+    return {2, tonumber(obj.remaining)} -- already refunded (idempotent success)
+end
 
 local limit = tonumber(redis.call('GET', KEYS[2]))
 if not limit then
-    return {-1, 0}  -- org not configured
+    return {-1, 0} -- org not configured
 end
 
 local current = tonumber(redis.call('GET', KEYS[1]) or 0)
+local units = tonumber(obj.units)
 
--- don't go below 0, don't go above limit
-local new_value = math.max(0, current - tonumber(ARGV[1]))
+local new_value = current - units
+if new_value < 0 then
+    new_value = 0
+end
+
 redis.call('SET', KEYS[1], new_value)
+local new_remaining = limit - new_value
 
-return {1, limit - new_value}  -- granted, new remaining
+obj.refunded = true
+obj.remaining = new_remaining
+redis.call('SET', KEYS[3], cjson.encode(obj), 'EX', tonumber(ARGV[3]))
+
+return {1, new_remaining}
 """
 
 
 def _get_period() -> str:
-    """Returns current UTC period in YYYY-MM format."""
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
-def _get_keys(org_id: str, feature: str) -> tuple[str, str]:
-    """Returns (counter_key, config_key) for given org and feature."""
+def _counter_key(org_id: str, feature: str, period: str) -> str:
+    return f"quota:{org_id}:{feature}:{period}"
+
+
+def _config_key(org_id: str, feature: str) -> str:
+    return f"quota_config:{org_id}:{feature}"
+
+
+def _request_key(idempotency_key: str) -> str:
+    return f"quota_request:{idempotency_key}"
+
+
+async def atomic_consume(
+    redis: Redis,
+    org_id: str,
+    feature: str,
+    units: int,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """
+    Atomically performs:
+    - idempotency lookup
+    - quota check
+    - deduction if granted
+    - request record creation
+
+    Returns:
+      {
+        "granted": bool,
+        "remaining": int,
+        "org_id": str,
+        "feature": str,
+        "period": str,
+        "refunded": bool,
+        "replayed": bool,   # true if returned from existing request record
+      }
+
+    Raises:
+      ValueError("org_not_configured")
+    """
     period = _get_period()
-    counter_key = f"quota:{org_id}:{feature}:{period}"
-    config_key = f"quota_config:{org_id}:{feature}"
-    return counter_key, config_key
+    counter_key = _counter_key(org_id, feature, period)
+    config_key = _config_key(org_id, feature)
+    request_key = _request_key(idempotency_key)
+
+    result = await redis.eval(
+        CONSUME_LUA_SCRIPT,
+        3,
+        counter_key,
+        config_key,
+        request_key,
+        units,
+        org_id,
+        feature,
+        period,
+        REQUEST_TTL_SECONDS,
+        COUNTER_TTL_SECONDS,
+    )
+
+    # result shape:
+    # {-1, 0, 0, 0}                     -> org not configured
+    # {1, granted_num, remaining, 0}    -> fresh execution
+    # {2, granted_num, remaining, refunded_num} -> replayed existing request
+    status = int(result[0])
+
+    if status == -1:
+        raise ValueError("org_not_configured")
+
+    replayed = status == 2
+    granted = bool(int(result[1]))
+    remaining = int(result[2])
+    refunded = bool(int(result[3]))
+
+    return {
+        "granted": granted,
+        "remaining": remaining,
+        "org_id": org_id,
+        "feature": feature,
+        "period": period,
+        "refunded": refunded,
+        "replayed": replayed,
+    }
 
 
-async def atomic_deduct(
-    redis: Redis, org_id: str, feature: str, units: int
-) -> tuple[int, int]:
+async def atomic_refund_by_request(
+    redis: Redis,
+    org_id: str,
+    feature: str,
+    original_idempotency_key: str,
+) -> dict[str, Any]:
     """
-    Atomically checks and deducts quota units.
-    Returns (status_code, remaining)
-      -1 = org not configured → 403
-       0 = quota exhausted   → 429
-       1 = granted           → 200
-    """
-    counter_key, config_key = _get_keys(org_id, feature)
-    result = await redis.eval(DEDUCT_LUA_SCRIPT, 2, counter_key, config_key, units)
-    return int(result[0]), int(result[1])
+    Refunds the ORIGINAL successful consume request exactly once.
 
+    Raises:
+      ValueError("org_not_configured")
+      ValueError("original_request_not_found")
+      ValueError("request_org_feature_mismatch")
+      ValueError("cannot_refund_denied_request")
+    """
+    period = _get_period()
+    counter_key = _counter_key(org_id, feature, period)
+    config_key = _config_key(org_id, feature)
+    request_key = _request_key(original_idempotency_key)
 
-async def atomic_refund(
-    redis: Redis, org_id: str, feature: str, units: int
-) -> tuple[int, int]:
-    """
-    Atomically refunds quota units back to the counter.
-    Returns (status_code, remaining)
-      -1 = org not configured → 403
-       1 = refund successful  → 200
-    """
-    counter_key, config_key = _get_keys(org_id, feature)
-    result = await redis.eval(REFUND_LUA_SCRIPT, 2, counter_key, config_key, units)
-    return int(result[0]), int(result[1])
+    result = await redis.eval(
+        REFUND_LUA_SCRIPT,
+        3,
+        counter_key,
+        config_key,
+        request_key,
+        org_id,
+        feature,
+        REQUEST_TTL_SECONDS,
+    )
+
+    status = int(result[0])
+    remaining = int(result[1])
+
+    if status == -1:
+        raise ValueError("org_not_configured")
+    if status == -2:
+        raise ValueError("original_request_not_found")
+    if status == -3:
+        raise ValueError("request_org_feature_mismatch")
+    if status == -4:
+        raise ValueError("cannot_refund_denied_request")
+
+    # status == 1 => refunded now
+    # status == 2 => already refunded; treat as idempotent success
+    return {
+        "granted": True,
+        "remaining": remaining,
+        "org_id": org_id,
+        "feature": feature,
+        "period": period,
+        "already_refunded": status == 2,
+    }
 
 
 async def get_usage(
-    redis: Redis, org_id: str, feature: str
+    redis: Redis,
+    org_id: str,
+    feature: str,
 ) -> tuple[int, int, int, str]:
     """
-    Fetches current usage from Redis.
     Returns (limit, used, remaining, period)
     Raises ValueError if org not configured.
     """
-    counter_key, config_key = _get_keys(org_id, feature)
+    period = _get_period()
+    counter_key = _counter_key(org_id, feature, period)
+    config_key = _config_key(org_id, feature)
 
     limit = await redis.get(config_key)
     current = await redis.get(counter_key)
@@ -111,7 +312,6 @@ async def get_usage(
     if limit is None:
         raise ValueError("org_not_configured")
 
-    limit = int(limit)
-    current = int(current or 0)
-
-    return limit, current, limit - current, _get_period()
+    limit_int = int(limit)
+    current_int = int(current or 0)
+    return limit_int, current_int, limit_int - current_int, period

@@ -30,5 +30,4 @@ class UsageResponse(BaseModel):
 class RefundRequest(BaseModel):
     org_id: str
     feature: str
-    units: int = Field(..., gt=0)
-    idempotency_key: str
+    original_idempotency_key: str
