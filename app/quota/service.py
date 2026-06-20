@@ -3,7 +3,7 @@ Business logic layer — orchestrates store calls,
 handles idempotency, and builds response models.
 """
 
-import json
+
 import calendar
 from datetime import datetime, timezone
 from redis.asyncio import Redis
@@ -13,10 +13,11 @@ from app.quota import store
 
 
 def _get_resets_at() -> datetime:
-    """Returns the last moment of the current month in UTC."""
     now = datetime.now(timezone.utc)
-    last_day = calendar.monthrange(now.year, now.month)[1]
-    return datetime(now.year, now.month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+    # first moment of next month, not last moment of current
+    if now.month == 12:
+        return datetime(now.year + 1, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    return datetime(now.year, now.month + 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
 def _get_period() -> str:

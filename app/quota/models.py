@@ -27,4 +27,8 @@ class UsageResponse(BaseModel):
     resets_at: datetime
 
 
-# TODO A refund request model for when the downstream falls and quotas need to be refunded.
+class RefundRequest(BaseModel):
+    org_id: str
+    feature: str
+    units: int = Field(..., gt=0)
+    idempotency_key: str

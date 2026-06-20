@@ -4,6 +4,7 @@ quota_guard is the single dependency injected into feature endpoints.
 """
 
 from fastapi import Request, HTTPException
+from redis.exceptions import RedisError
 from app.quota import service
 
 
@@ -45,6 +46,11 @@ def quota_guard(feature: str, units: int = 1):
                 feature=feature,
                 units=units,
                 idempotency_key=idempotency_key,
+            )
+        except RedisError as e:
+            raise HTTPException(
+                status_code=503,
+                detail="Quota service temporarily unavailable"
             )
         except ValueError as e:
             if str(e) == "org_not_configured":

@@ -5,7 +5,7 @@ from motor.motor_asyncio import AsyncIOMotorClient # a pymongo alternative for a
 # ------ Redis, Mongo and Db name extracted from ENV vars-----
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
-DB_NAME = os.getenv("DB_NAME", "quota_meter_db")
+DB_NAME = os.getenv("DB_NAME", "quota_db")
 
 
 # ------ connection factories------

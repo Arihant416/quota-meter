@@ -3,12 +3,13 @@ Feature endpoints — demonstrate quota engine in action.
 Each endpoint is protected by quota_guard dependency.
 """
 
-from fastapi import APIRouter, Depends, Request, HTTPException
+from fastapi import Request, HTTPException
 from fastapi.routing import APIRouter
 from pydantic import BaseModel, Field
-from app.quota.models import QuotaResult, UsageResponse
+from app.quota.models import QuotaResult, UsageResponse, RefundRequest
 from app.quota.dependencies import quota_guard
 from app.quota import service
+from app.core.config import DB_NAME
 
 router = APIRouter()
 
@@ -24,13 +25,6 @@ class SailingSchedulePayload(BaseModel):
     origin_port: str
     destination_port: str
     lookups: int = Field(default=1, gt=0)
-
-
-class RefundPayload(BaseModel):
-    org_id: str
-    feature: str
-    units: int = Field(..., gt=0)
-    idempotency_key: str
 
 
 class QuotaConfigPayload(BaseModel):
@@ -97,7 +91,7 @@ async def quota_usage(
     Returns current quota usage for an org and feature.
     """
     redis = request.app.state.redis
-    db = request.app.state.mongo
+    db = request.app.state.mongo[DB_NAME]
 
     try:
         return await service.get_usage(redis, db, org_id, feature)
@@ -111,7 +105,7 @@ async def quota_usage(
 @router.post("/quota/refund")
 async def quota_refund(
     request: Request,
-    payload: RefundPayload,
+    payload: RefundRequest,
 ) -> QuotaResult:
     """
     Refunds quota units back to an org.
@@ -143,7 +137,7 @@ async def quota_config(
     Writes to both Redis and MongoDB simultaneously.
     """
     redis = request.app.state.redis
-    db = request.app.state.mongo
+    db = request.app.state.mongo[DB_NAME]
 
     config_key = f"quota_config:{payload.org_id}:{payload.feature}"
 

@@ -32,6 +32,11 @@ async def warmup():
         await mongo.admin.command("ping")
         logger.info("✅ MongoDB connected")
 
+        await db["quota_configs"].create_index(
+            [("org_id", 1), ("feature", 1)], unique=True
+        )
+        logger.info("✅ MongoDB index ensured")
+
         # fetch all configs from MongoDB
         configs = await db["quota_configs"].find({}).to_list(length=None)
 
