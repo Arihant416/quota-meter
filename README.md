@@ -431,6 +431,10 @@ Swagger UI: <http://localhost:8001/docs>
 
 The load simulator waits for all three quota services to pass their health checks before firing. No manual setup needed.
 
+```txt
+NOTE : The warmup script runs automatically on each container boot before uvicorn starts. Since all three instances write the same config values from MongoDB, concurrent warmup runs are idempotent and safe. Manual re-run is only needed if Redis restarts independently while app containers remain running.
+```
+
 ---
 
 ## Scaling to 50,000 Organizations
@@ -488,7 +492,7 @@ Single Redis node is a single point of failure. Production needs Redis Sentinel 
 Refunds issued after a period rollover are effectively no-ops on the counter. Production fix: store the counter key name in the request record and use it directly for refunds regardless of current period.
 
 **Warmup automation:**
-Currently requires manual re-run of warmup script after Redis restart. Production should trigger warmup automatically on startup with a health gate — do not accept traffic until warm.
+In the Docker setup, warmup runs automatically before each instance starts. The gap is when Redis restarts independently — the app containers don't restart, so warmup doesn't re-run. Production hardening: health gate that detects empty Redis and triggers warmup automatically without requiring a full app restart.
 
 ---
 
