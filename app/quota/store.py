@@ -4,8 +4,6 @@ from __future__ import annotations
 This is the heart of the quota-meter engine.
 Handles all Redis operations including atomic Lua scripts.
 
-Redis store + Lua scripts for quota metering.
-
 Key ideas:
 - Quota deduction is atomic.
 - Idempotency is handled inside the same Lua script as quota mutation.
@@ -13,7 +11,6 @@ Key ideas:
 """
 
 
-import json
 from datetime import datetime, timezone
 from typing import Any
 

@@ -581,5 +581,4 @@ docker logs load-simulator
 - The load simulation validates the service under concurrent multi-instance traffic and checks that quota is never over-served.
 - If you only want to run the tests, you do **not** need to start the full multi-instance stack — Redis and MongoDB are enough.
 
-
-**To conclude:** This was genuinely a very interesting problem to work on.
+**To conclude:** This was genuinely a very interesting problem — the concurrency correctness requirement forced every other decision into a specific shape. I enjoyed working through it.
