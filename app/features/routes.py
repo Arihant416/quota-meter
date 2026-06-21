@@ -86,9 +86,6 @@ async def quota_refund(
     request: Request,
     payload: RefundRequest,
 ) -> QuotaResult:
-    """
-    Refund a previously granted consume request using the ORIGINAL consume idempotency key.
-    """
     redis = request.app.state.redis
 
     try:
@@ -129,7 +126,8 @@ async def quota_config(
     redis = request.app.state.redis
     db = request.app.state.mongo[DB_NAME]
 
-    config_key = f"quota_config:{payload.org_id}:{payload.feature}"
+    # FIX (Flaw A): Enforce curly braces around org_id to match cluster alignment patterns in store.py
+    config_key = f"quota_config:{{{payload.org_id}}}:{payload.feature}"
 
     # Write to Redis hot store
     await redis.set(config_key, payload.limit)

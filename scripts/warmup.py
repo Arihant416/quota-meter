@@ -48,7 +48,8 @@ async def warmup():
         # load into Redis using pipeline for speed
         pipe = redis.pipeline()
         for config in configs:
-            key = f"quota_config:{config['org_id']}:{config['feature']}"
+            # FIX (Flaw A): Enforce curly braces around org_id to match cluster alignment patterns in store.py
+            key = f"quota_config:{{{config['org_id']}}}:{config['feature']}"
             pipe.set(key, config["limit"])  # no TTL — permanent
 
         await pipe.execute()

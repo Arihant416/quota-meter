@@ -17,7 +17,7 @@ from typing import Any
 from redis.asyncio import Redis
 
 COUNTER_TTL_SECONDS = 35 * 24 * 60 * 60  # 35 days
-REQUEST_TTL_SECONDS = 35 * 24 * 60 * 60  # keep request records for the billing period
+REQUEST_TTL_SECONDS = 7 * 24 * 60 * 60  # FIX (Flaw B): Keep request records for 7 days only to prevent OOM
 
 
 CONSUME_LUA_SCRIPT = """
@@ -135,7 +135,8 @@ if new_value < 0 then
     new_value = 0
 end
 
-redis.call('SET', KEYS[1], new_value)
+-- FIX (Flaw C): Use KEEPTTL flag to prevent clearing the counter's monthly expiration window
+redis.call('SET', KEYS[1], new_value, 'KEEPTTL')
 local new_remaining = limit - new_value
 
 obj.refunded = true
@@ -150,16 +151,19 @@ def _get_period() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
+# FIX (Flaw A): Wrap org_id in curly braces to ensure all keys hash to the same cluster slot
 def _counter_key(org_id: str, feature: str, period: str) -> str:
-    return f"quota:{org_id}:{feature}:{period}"
+    return f"quota:{{{org_id}}}:{feature}:{period}"
 
 
+# FIX (Flaw A): Wrap org_id in curly braces to ensure all keys hash to the same cluster slot
 def _config_key(org_id: str, feature: str) -> str:
-    return f"quota_config:{org_id}:{feature}"
+    return f"quota_config:{{{org_id}}}:{feature}"
 
 
-def _request_key(idempotency_key: str) -> str:
-    return f"quota_request:{idempotency_key}"
+# FIX (Flaw A): Added org_id parameter and wrapped in curly braces to solve CROSSSLOT cluster errors
+def _request_key(org_id: str, idempotency_key: str) -> str:
+    return f"quota_request:{{{org_id}}}:{idempotency_key}"
 
 
 async def atomic_consume(
@@ -169,31 +173,10 @@ async def atomic_consume(
     units: int,
     idempotency_key: str,
 ) -> dict[str, Any]:
-    """
-    Atomically performs:
-    - idempotency lookup
-    - quota check
-    - deduction if granted
-    - request record creation
-
-    Returns:
-      {
-        "granted": bool,
-        "remaining": int,
-        "org_id": str,
-        "feature": str,
-        "period": str,
-        "refunded": bool,
-        "replayed": bool,   # true if returned from existing request record
-      }
-
-    Raises:
-      ValueError("org_not_configured")
-    """
     period = _get_period()
     counter_key = _counter_key(org_id, feature, period)
     config_key = _config_key(org_id, feature)
-    request_key = _request_key(idempotency_key)
+    request_key = _request_key(org_id, idempotency_key)  # Passed org_id here
 
     result = await redis.eval(
         CONSUME_LUA_SCRIPT,
@@ -209,10 +192,6 @@ async def atomic_consume(
         COUNTER_TTL_SECONDS,
     )
 
-    # result shape:
-    # {-1, 0, 0, 0}                     -> org not configured
-    # {1, granted_num, remaining, 0}    -> fresh execution
-    # {2, granted_num, remaining, refunded_num} -> replayed existing request
     status = int(result[0])
 
     if status == -1:
@@ -240,19 +219,10 @@ async def atomic_refund_by_request(
     feature: str,
     original_idempotency_key: str,
 ) -> dict[str, Any]:
-    """
-    Refunds the ORIGINAL successful consume request exactly once.
-
-    Raises:
-      ValueError("org_not_configured")
-      ValueError("original_request_not_found")
-      ValueError("request_org_feature_mismatch")
-      ValueError("cannot_refund_denied_request")
-    """
     period = _get_period()
     counter_key = _counter_key(org_id, feature, period)
     config_key = _config_key(org_id, feature)
-    request_key = _request_key(original_idempotency_key)
+    request_key = _request_key(org_id, original_idempotency_key)  # Passed org_id here
 
     result = await redis.eval(
         REFUND_LUA_SCRIPT,
@@ -277,8 +247,6 @@ async def atomic_refund_by_request(
     if status == -4:
         raise ValueError("cannot_refund_denied_request")
 
-    # status == 1 => refunded now
-    # status == 2 => already refunded; treat as idempotent success
     return {
         "granted": True,
         "remaining": remaining,
@@ -294,10 +262,6 @@ async def get_usage(
     org_id: str,
     feature: str,
 ) -> tuple[int, int, int, str]:
-    """
-    Returns (limit, used, remaining, period)
-    Raises ValueError if org not configured.
-    """
     period = _get_period()
     counter_key = _counter_key(org_id, feature, period)
     config_key = _config_key(org_id, feature)
