@@ -27,11 +27,13 @@ def current_period() -> str:
 
 
 def counter_key(org_id: str = TEST_ORG, feature: str = TEST_FEATURE) -> str:
-    return f"quota:{org_id}:{feature}:{current_period()}"
+    # FIX: Wrap org_id in curly braces to align with cluster hash tag constraints
+    return f"quota:{{{org_id}}}:{feature}:{current_period()}"
 
 
 def config_key(org_id: str = TEST_ORG, feature: str = TEST_FEATURE) -> str:
-    return f"quota_config:{org_id}:{feature}"
+    # FIX: Wrap org_id in curly braces to align with cluster hash tag constraints
+    return f"quota_config:{{{org_id}}}:{feature}"
 
 
 @pytest.fixture
