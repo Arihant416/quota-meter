@@ -27,7 +27,7 @@ I used AI as a design partner and sounding board throughout this project. I want
 - The four weighted decisions (all-or-nothing batch, deduct+refund semantics, calendar month UTC, Lua for atomicity)
 - Moving idempotency handling inside the Lua script itself (the key architectural insight)
 - Tying refunds to the original consume request record rather than accepting arbitrary unit amounts
-- The Redis key schema
+- The Redis key schema and cluster-readiness decisions
 - The request record design (storing granted/units/refunded state alongside the idempotency result)
 - Every tradeoff documented in this file
 
@@ -155,7 +155,7 @@ Every consume request requires an `X-Idempotency-Key` header. The request record
 }
 ```
 
-This record serves as both the idempotency cache and the refund source of truth. TTL is 35 days — covers the full billing period.
+This record serves as both the idempotency cache and the refund source of truth. TTL is 7 days — long enough to cover any reasonable retry or refund window, while avoiding the memory cost of keeping records for the full 35-day billing period.
 
 **Note on replayed responses:** When a request is replayed via idempotency key, the `remaining` field in the response reflects quota at the time of the original request, not current quota. This is standard idempotency contract behavior.
 
@@ -176,8 +176,8 @@ This record serves as both the idempotency cache and the refund source of truth.
 The period is part of the Redis counter key:
 
 ```
-quota:org1:container-tracking:2026-06  →  June counter
-quota:org1:container-tracking:2026-07  →  July counter (new key, starts at 0)
+quota:{org1}:container-tracking:2026-06  →  June counter
+quota:{org1}:container-tracking:2026-07  →  July counter (new key, starts at 0)
 ```
 
 When July arrives, requests naturally use a new key. The old key expires via TTL (35 days). No reset operation, no scheduled job, no race condition around reset time. Self-managing.
@@ -204,13 +204,15 @@ When July arrives, requests naturally use a new key. The old key expires via TTL
 
 ### Redis Key Schema
 
+All keys use `{org_id}` as a hash tag, ensuring all keys for a given org land on the same Redis Cluster slot. This is required for Lua script atomicity in cluster mode.
+
 ```
 quota_config:{org_id}:{feature}              → configured limit (integer), no TTL
 quota:{org_id}:{feature}:{YYYY-MM}           → usage counter (integer), TTL 35 days
-quota_request:{idempotency_key}              → request record (JSON), TTL 35 days
+quota_request:{org_id}:{idempotency_key}     → request record (JSON), TTL 7 days
 ```
 
-Config keys have no TTL — they live until explicitly changed. Counter and request keys expire naturally after 35 days, cleaning up stale billing period data without any maintenance job.
+Config keys have no TTL — they live until explicitly changed. Counter keys expire after 35 days. Request records expire after 7 days — sufficient to cover any retry or refund window.
 
 ### MongoDB Schema
 
@@ -239,6 +241,8 @@ Lazy loading (cache-aside) creates thundering herd risk at Redis restart or mont
 **On config change:** Write-through. The admin endpoint writes to both MongoDB and Redis in the same request. Redis is always consistent with MongoDB.
 
 **On Redis restart:** Re-run the warmup script (pipeline bulk write, completes in seconds). AOF persistence means this is a rare edge case in practice.
+
+**Concurrent warmup across instances:** All three service instances run the warmup script on startup. Writes are idempotent (`SET` on existing keys overwrites with the same value), so concurrent warmup runs are safe and produce consistent Redis state.
 
 ---
 
@@ -302,8 +306,11 @@ Lua script checks for the config key first. If absent, returns HTTP 403.
 **Org mismatch on refund:**
 The request record stores `org_id` and `feature`. The refund script validates these match the caller's supplied values. Mismatch returns HTTP 400.
 
+**Counter TTL preserved on refund:**
+When a refund writes the updated counter back to Redis, it uses `SET ... KEEPTTL` to preserve the existing 35-day expiry. Without this, a refund would silently remove the counter's TTL and cause it to persist indefinitely.
+
 **Cross-period refund:**
-Known limitation. Refunds are tied to the current implementation’s period-based counter keys, so refunds issued after a period rollover are not fully handled in a robust way today. A production fix would be to store the original counter period (or original counter key) in the request record and always refund against that exact key instead of deriving the period at refund time.
+Known limitation. Refunds are tied to the current period's counter key. Refunds issued after a period rollover are effectively no-ops on the counter — the current period counter starts at 0, floors to 0, and the refund has no effect. The `refunded` flag on the request record is still set, preventing a second attempt. A production fix would store the original counter key inside the request record and always refund against that key directly.
 
 ---
 
@@ -402,9 +409,9 @@ PASS: same idempotency key consumed quota only once
 
 **Clock skew:** Period calculation uses `datetime.now(timezone.utc)`. All instances use the same UTC reference. Skew is not a concern because the period string (`2026-06`) is coarse-grained.
 
-**Idempotency key scope:** Keys are currently global, not scoped to org or feature. A key generated for one org could theoretically collide with another. In production, keys should be scoped to prevent cross-org collisions.
+**Idempotency key scope:** Request record keys are scoped to `{org_id}:{idempotency_key}`, preventing cross-org key collisions and ensuring all keys for an org hash to the same Redis Cluster slot.
 
-**Request record TTL:** Both counters and request records have a 35-day TTL. If a request record expires before the caller retries (edge case), the retry is treated as a fresh request.
+**Request record TTL:** Request records have a 7-day TTL. If a record expires before the caller retries or issues a refund, the retry is treated as a fresh request and the original quota cannot be recovered programmatically.
 
 **Admin endpoint authentication:** The admin endpoint has no auth — any caller can modify any org's quota. Intentional for the take-home, would need auth middleware in production.
 
@@ -431,36 +438,23 @@ Swagger UI: <http://localhost:8001/docs>
 
 The load simulator waits for all three quota services to pass their health checks before firing. No manual setup needed.
 
-```txt
-NOTE : The warmup script runs automatically on each container boot before uvicorn starts. Since all three instances write the same config values from MongoDB, concurrent warmup runs are idempotent and safe. Manual re-run is only needed if Redis restarts independently while app containers remain running.
-```
+> **Note on warmup:** The warmup script runs automatically on each container boot before uvicorn starts. Since all three instances write the same config values from MongoDB, concurrent warmup runs are idempotent and safe. Manual re-run is only needed if Redis restarts independently while app containers remain running.
 
 ---
 
 ## Scaling to 50,000 Organizations
 
-The current design is intended to support the assignment’s 5,000-org scale target.
-For a much larger deployment such as 50,000 orgs, Redis Cluster and a small key schema change would be the main next steps.
+The current design is intended to support the assignment's 5,000-org scale target. For a much larger deployment such as 50,000 orgs, Redis Cluster is the main operational change — the key schema is already cluster-ready.
 
-**Redis Cluster** is the main change needed. The current Lua script accesses three keys:
-
-```
-quota:{org_id}:{feature}:{period}      ← counter
-quota_config:{org_id}:{feature}        ← config
-quota_request:{idempotency_key}        ← request record
-```
-
-In Redis Cluster, all keys accessed in a Lua script must hash to the same slot. The current key schema does not guarantee this — the request record key uses only the idempotency key as its identifier, which may land on a different slot than the counter and config keys. This would cause a CROSSSLOT error in cluster mode.
-
-To fix for cluster deployment, all three keys need a shared hash tag based on `org_id`:
+**Redis Cluster readiness:** All three keys accessed in the Lua script share `{org_id}` as a hash tag:
 
 ```
-{org1}:quota:container-tracking:2026-06
-{org1}:quota_config:container-tracking
-{org1}:quota_request:{idempotency_key}
+quota:{org_id}:{feature}:{period}          ← counter
+quota_config:{org_id}:{feature}            ← config
+quota_request:{org_id}:{idempotency_key}   ← request record
 ```
 
-This is straightforward but requires a key schema migration.
+All three hash to the same cluster slot. No CROSSSLOT errors. No key schema migration needed for cluster deployment.
 
 **Warmup at scale:** 50,000 orgs × 30 features = 1.5M config keys × ~100 bytes = ~150MB. Loaded via pipeline in under 30 seconds. Within Redis capacity on standard hardware.
 
@@ -489,7 +483,7 @@ Currently plain Python logging. Production needs structured JSON logs, Prometheu
 Single Redis node is a single point of failure. Production needs Redis Sentinel or Cluster.
 
 **Cross-period refunds:**
-Refunds issued after a period rollover are effectively no-ops on the counter. Production fix: store the counter key name in the request record and use it directly for refunds regardless of current period.
+Refunds issued after a period rollover are effectively no-ops on the counter. Production fix: store the original counter key inside the request record and use it directly for refunds regardless of current period.
 
 **Warmup automation:**
 In the Docker setup, warmup runs automatically before each instance starts. The gap is when Redis restarts independently — the app containers don't restart, so warmup doesn't re-run. Production hardening: health gate that detects empty Redis and triggers warmup automatically without requiring a full app restart.
@@ -516,14 +510,16 @@ quota-meter/
 ├── load_test/
 │   └── simulate.py             Two-scenario load simulator
 ├── tests/
-│   └── test_concurrency.py     Six correctness proofs      
+│   └── test_concurrency.py     Six correctness proofs
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
 └── pytest.ini
 ```
 
-## Running tests
+---
+
+## Running Tests
 
 ### 1) Run the concurrency test suite
 
