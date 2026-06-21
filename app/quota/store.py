@@ -59,7 +59,8 @@ if not limit then
 end
 
 -- 3) Load current usage
-local current = tonumber(redis.call('GET', KEYS[1]) or 0)
+local raw_current = redis.call('GET', KEYS[1])
+local current = tonumber(raw_current or 0)
 local units = tonumber(ARGV[1])
 local remaining = limit - current
 
@@ -68,7 +69,12 @@ local new_remaining = remaining
 
 if remaining >= units then
     redis.call('INCRBY', KEYS[1], units)
-    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
+    
+    -- OPTIMIZATION: Only apply EXPIRE if the key did not exist prior to this transaction
+    if not raw_current then
+        redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
+    end
+    
     granted = 1
     new_remaining = remaining - units
 else
