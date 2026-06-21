@@ -285,8 +285,10 @@ In a larger production deployment, feature services could either import the quot
 
 ## Corner Cases Handled
 
-**First request of a new month:**
-Counter key does not exist yet. The Lua script handles this: `tonumber(redis.call('GET', KEYS[1]) or 0)` — nil becomes 0. First request of a new period works correctly without any setup.
+**First request of a new month (Lazy Expiry Initialization):**
+Counter key does not exist yet. The Lua script intercepts the initial `GET` call: if it returns `nil`, the system treats current usage as `0` and flags the key as brand new.
+
+Upon granting the quota, the script applies the 35-day `EXPIRE` TTL *exclusively* on this first invocation. For all subsequent millions of requests within that calendar month, the script reads the pre-existing counter and completely bypasses the `EXPIRE` command. This turns an $O(N)$ write-heavy "TTL refresh storm" into a single, clean $O(1)$ setup step at the boundary of the month, dramatically reducing the cluster shard write-load under high concurrency.
 
 **Exact exhaustion:**
 If remaining equals requested exactly, the request is granted. Counter hits the limit precisely. Tested explicitly.
