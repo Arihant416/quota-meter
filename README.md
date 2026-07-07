@@ -1,35 +1,12 @@
-# Quota Metering Engine — Design and Implementation Notes
+# Quota Metering Engine
 
 ---
 
-## What This Is
+## Overview
 
 A per-customer, per-feature monthly quota enforcement system built as a horizontally scalable FastAPI service. Each customer organization gets a configurable monthly allowance for specific API features. Every inbound request checks and deducts from that allowance atomically before the underlying feature executes.
 
-The key question is to make four explicit decisions: concurrent correctness, batch behavior, failure and retry semantics, and reset and reporting. Everything else — storage, integration shape, failure posture — follows from those four.
-
----
-
-## AI Assistance Disclosure
-
-I used AI as a design partner and sounding board throughout this project. I want to be specific about what that means in practice:
-
-**Where AI helped:**
-
-- Brainstorming the initial architecture and talking through tradeoffs (cache-aside vs warm Redis, lazy loading vs permanent warmup, etc.)
-- Explaining Lua syntax and Redis Lua semantics — I hadn't written this complicated Lua before this
-- Generating the initial test scaffolding which I then rewrote significantly
-- Suggesting FastAPI-specific patterns like `Depends()` and lifespan context managers
-- Pointing out the idempotency race condition in my first implementation
-
-**What I designed and decided myself:**
-
-- The four weighted decisions (all-or-nothing batch, deduct+refund semantics, calendar month UTC, Lua for atomicity)
-- Moving idempotency handling inside the Lua script itself (the key architectural insight)
-- Tying refunds to the original consume request record rather than accepting arbitrary unit amounts
-- The Redis key schema and cluster-readiness decisions
-- The request record design (storing granted/units/refunded state alongside the idempotency result)
-- Every tradeoff documented in this file
+The project centers on four design concerns: concurrent correctness, batch behavior, failure and retry semantics, and reset and reporting. Everything else — storage, integration shape, failure posture — follows from those choices.
 
 ---
 
@@ -55,7 +32,7 @@ Three FastAPI instances share one Redis and one MongoDB. Instances are completel
 
 ---
 
-## The Four Weighted Decisions
+## Core Design Decisions
 
 ### 1. Concurrent Correctness
 
@@ -67,18 +44,18 @@ The naive approach is a read-then-write sequence:
 GET counter → check if enough → INCRBY counter
 ```
 
-Between the GET and the INCRBY, another instance reads the same stale value. Both see sufficient quota. Both deduct. Quota goes negative or over-serves. This is a TOCTOU (Time Of Check, Time Of Use) race condition and it's explicitly what the assignment warns against.
+Between the GET and the INCRBY, another instance reads the same stale value. Both see sufficient quota. Both deduct. Quota goes negative or over-serves. This is a TOCTOU (Time Of Check, Time Of Use) race condition, so the quota decision and deduction need to be a single atomic operation.
 
-My first implementation put the idempotency check in Python before calling the Lua script, which introduced a second race: two concurrent requests with the same idempotency key could both miss the cache simultaneously, both proceed to the Lua script, and both deduct — exactly defeating the purpose of idempotency.
+Putting the idempotency check in Python before calling the Lua script introduces a second race: two concurrent requests with the same idempotency key can both miss the cache simultaneously, both proceed to the Lua script, and both deduct — exactly defeating the purpose of idempotency.
 
-**What I rejected:**
+**Rejected approaches:**
 
 - `WATCH/MULTI/EXEC` (optimistic locking): under high contention for the same org, transaction aborts spike into a retry storm. Unacceptable at 10k TPS.
 - Distributed lock (Redlock): adds latency and failure modes. The Lua script is already the lock.
 - Per-instance counters: ruled out immediately. Instances come and go, state diverges.
 - Python-layer idempotency check before Lua: race condition as described above.
 
-**What I actually did:**
+**Implementation:**
 
 Both the idempotency lookup and the quota deduction happen inside a single Lua script. Redis executes Lua scripts atomically — no other command can interleave between lines. The full sequence is:
 
@@ -121,7 +98,7 @@ In a supply chain context, partial tracking is semantically broken. If you uploa
 
 **This is the most nuanced decision.**
 
-**What I chose: deduct-then-compensate with request-tied refunds.**
+**Decision: Deduct-then-compensate with request-tied refunds.**
 
 The consume path performs an immediate atomic deduction. If the downstream operation fails after a successful deduction, the caller issues a refund via `POST /api/v1/quota/refund` with the original consume idempotency key. The system refunds exactly the units from that original request — the caller cannot specify an arbitrary refund amount.
 
@@ -135,7 +112,7 @@ The consume path performs an immediate atomic deduction. If the downstream opera
 
 This is compensating transaction semantics, not reservation semantics. If a caller deducts quota and then crashes before issuing a refund, quota is permanently consumed for that period until manual reconciliation. This is a conscious tradeoff for implementation simplicity.
 
-**What I would do in production:**
+**Production direction:**
 
 Move to a reserve → commit → release model: the consume call reserves units (marks them pending), the downstream operation commits or releases. Stale pending reservations expire automatically after a timeout. This is strictly more robust but adds significant complexity to both the quota engine and all consumers.
 
@@ -316,7 +293,7 @@ Known limitation. Refunds are tied to the current period's counter key. Refunds 
 
 ---
 
-## What The Tests Prove
+## What The Tests Cover
 
 ### Unit / Concurrency Tests
 
@@ -415,7 +392,7 @@ PASS: same idempotency key consumed quota only once
 
 **Request record TTL:** Request records have a 7-day TTL. If a record expires before the caller retries or issues a refund, the retry is treated as a fresh request and the original quota cannot be recovered programmatically.
 
-**Admin endpoint authentication:** The admin endpoint has no auth — any caller can modify any org's quota. Intentional for the take-home, would need auth middleware in production.
+**Admin endpoint authentication:** The admin endpoint has no auth — any caller can modify any org's quota. This keeps the local demo simple, but production needs auth middleware.
 
 ---
 
@@ -446,7 +423,7 @@ The load simulator waits for all three quota services to pass their health check
 
 ## Scaling to 50,000 Organizations
 
-The current design is intended to support the assignment's 5,000-org scale target. For a much larger deployment such as 50,000 orgs, Redis Cluster is the main operational change — the key schema is already cluster-ready.
+The current design is built to scale beyond a small single-node deployment. For a larger deployment such as 50,000 orgs, Redis Cluster is the main operational change — the key schema is already cluster-ready.
 
 **Redis Cluster readiness:** All three keys accessed in the Lua script share `{org_id}` as a hash tag:
 
@@ -470,7 +447,7 @@ All three hash to the same cluster slot. No CROSSSLOT errors. No key schema migr
 
 ---
 
-## What Is Out of Scope / Production Hardening Needed
+## Production Hardening Roadmap
 
 **Authentication and authorization:**
 Admin endpoint has no auth. Feature endpoints trust `X-Org-ID` without verification. Production needs JWT validation or API key auth.
@@ -583,4 +560,4 @@ docker logs load-simulator
 - The load simulation validates the service under concurrent multi-instance traffic and checks that quota is never over-served.
 - If you only want to run the tests, you do **not** need to start the full multi-instance stack — Redis and MongoDB are enough.
 
-**To conclude:** This was genuinely a very interesting problem — the concurrency correctness requirement forced every other decision into a specific shape. I enjoyed working through it.
+This project is intentionally small at the API boundary and strict at the consistency boundary. The next growth areas are authentication, reservation semantics, observability, and Redis high availability.
