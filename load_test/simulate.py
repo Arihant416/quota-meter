@@ -3,10 +3,10 @@ Load simulator for the quota metering service.
 
 Goals
 -----
-1. Exercise quota enforcement under concurrent load across multiple service instances.
+1. Stress quota enforcement under concurrent load across multiple service instances.
 2. Verify the system never over-serves beyond the configured quota.
 3. Verify same-idempotency-key retries do not double-charge.
-4. Produce simple latency and correctness metrics that can be cited in DESIGN.md.
+4. Produce simple latency and correctness metrics for docs and regression checks.
 
 Scenarios
 ---------
